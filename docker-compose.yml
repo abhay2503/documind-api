@@ -1,0 +1,28 @@
+# Local AWS emulation (S3 + SQS) for the DocuMind API. The Node API itself is NOT containerized;
+# it runs with `npm run offline`. MySQL uses the MySQL server already running on the host.
+#
+# Image: LocalStack Community 4.14.0 — the last release that runs without an auth token
+# (2026.x images refuse to start without a LocalStack license). No token is needed.
+# Community edition has no persistence: S3 objects and queues reset on restart, and the
+# init script recreates the bucket/queues every time the container starts.
+services:
+  localstack:
+    image: localstack/localstack:4.14.0
+    container_name: documind-localstack
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      - SERVICES=s3,sqs
+      - AWS_DEFAULT_REGION=ap-south-1
+      # Validate presigned URL signatures like real S3 (LocalStack skips this by default).
+      - S3_SKIP_SIGNATURE_VALIDATION=0
+      - DOCUMIND_BUCKET=${S3_BUCKET_NAME:-documind-documents-local}
+      - DOCUMIND_CORS_ORIGIN=${CORS_ALLOWED_ORIGIN:-http://localhost:3000}
+    volumes:
+      - ./docker/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    healthcheck:
+      # Healthy only after init-aws.sh has finished creating the bucket and queues.
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

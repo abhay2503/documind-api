@@ -1,0 +1,62 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # AWS OIDC
+  contents: read
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      # serverless.yml reads these via ${env:...}; .env.prod must define every key.
+      - name: Write .env.prod
+        run: |
+          cat > .env.prod <<ENV
+          NODE_ENV=production
+          AWS_REGION=ap-south-1
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_CONNECTION_LIMIT=2
+          S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }}
+          SQS_QUEUE_URL=
+          LOCAL_AWS_ENDPOINT=
+          CORS_ALLOWED_ORIGIN=${{ secrets.CORS_ALLOWED_ORIGIN }}
+          UPLOAD_URL_EXPIRES_SECONDS=900
+          MAX_UPLOAD_BYTES=10485760
+          SQS_VISIBILITY_TIMEOUT_SECONDS=5400
+          ENV
+          sed -i 's/^ *//' .env.prod
+
+      # CI uses the OIDC role, not the local "document-ai" SSO profile.
+      - name: Deploy
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+        run: npx serverless deploy --stage prod --param="awsProfile="

@@ -1,0 +1,170 @@
+# DocuMind API — Node.js + TypeScript on AWS Lambda (Serverless Framework v4).
+#
+# Environment files (loaded automatically by Serverless v4):
+#   --stage local (default) -> .env
+#   --stage prod            -> .env.prod  (NOTE: v4 also loads .env for any variable missing
+#                                          from .env.prod, so .env.prod must define every key)
+# Code reads values via process.env (src/config). AWS access uses the Lambda IAM role.
+
+service: documind-api
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  architecture: arm64
+  region: ap-south-1
+  stage: ${opt:stage, 'local'}
+  profile: ${param:awsProfile}
+  memorySize: 512
+  timeout: 15
+  logRetentionInDays: 14
+  httpApi:
+    cors:
+      allowedOrigins:
+        - ${env:CORS_ALLOWED_ORIGIN}
+      allowedHeaders:
+        - Content-Type
+        - Idempotency-Key
+      allowedMethods:
+        - GET
+        - POST
+        - OPTIONS
+      maxAge: 600
+  environment:
+    NODE_ENV: ${env:NODE_ENV}
+    DB_HOST: ${env:DB_HOST}
+    DB_PORT: ${env:DB_PORT, '3306'}
+    DB_USER: ${env:DB_USER}
+    DB_PASSWORD: ${env:DB_PASSWORD}
+    DB_NAME: ${env:DB_NAME}
+    DB_CONNECTION_LIMIT: ${env:DB_CONNECTION_LIMIT, '2'}
+    S3_BUCKET_NAME: ${env:S3_BUCKET_NAME}
+    SQS_QUEUE_URL: ${param:queueUrl}
+    UPLOAD_URL_EXPIRES_SECONDS: ${env:UPLOAD_URL_EXPIRES_SECONDS, '900'}
+    MAX_UPLOAD_BYTES: ${env:MAX_UPLOAD_BYTES, '10485760'}
+    LOCAL_AWS_ENDPOINT: ${param:localAwsEndpoint}
+  iam:
+    role:
+      statements:
+        # Presigned PUT is signed with this role; HeadObject needs GetObject; DeleteObject removes invalid uploads.
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+          Resource: arn:aws:s3:::${env:S3_BUCKET_NAME}/documents/*
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+          Resource: ${param:queueArn}
+
+params:
+  default:
+    awsProfile: ''
+    queueUrl: ${env:SQS_QUEUE_URL}
+    queueArn: arn:aws:sqs:${aws:region}:000000000000:documind-summary-queue-${sls:stage}
+    localAwsEndpoint: ${env:LOCAL_AWS_ENDPOINT, ''}
+  prod:
+    awsProfile: document-ai
+    queueUrl: !Ref SummaryQueue
+    queueArn: !GetAtt SummaryQueue.Arn
+    # Never point production at LocalStack, even if .env defines it.
+    localAwsEndpoint: ''
+
+functions:
+  createUpload:
+    handler: src/handlers/createUpload.handler
+    events:
+      - httpApi:
+          method: POST
+          path: /uploads
+  completeUpload:
+    handler: src/handlers/completeUpload.handler
+    events:
+      - httpApi:
+          method: POST
+          path: /documents/{documentId}/complete
+  createSummary:
+    handler: src/handlers/createSummary.handler
+    events:
+      - httpApi:
+          method: POST
+          path: /summaries
+  getSummary:
+    handler: src/handlers/getSummary.handler
+    events:
+      - httpApi:
+          method: GET
+          path: /summaries/{jobId}
+
+build:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    target: node22
+
+plugins:
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 4000
+    lambdaPort: 4002
+    noPrependStageInUrl: true
+
+resources:
+  Resources:
+    DocumentsBucket:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        BucketName: ${env:S3_BUCKET_NAME}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerEnforced
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - ${env:CORS_ALLOWED_ORIGIN}
+              AllowedMethods:
+                - PUT
+              AllowedHeaders:
+                - '*'
+              MaxAge: 3000
+
+    SummaryDeadLetterQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: documind-summary-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
+
+    SummaryQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: documind-summary-queue-${sls:stage}
+        VisibilityTimeout: ${env:SQS_VISIBILITY_TIMEOUT_SECONDS, '5400'}
+        MessageRetentionPeriod: 345600
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt SummaryDeadLetterQueue.Arn
+          maxReceiveCount: 3
+
+  Outputs:
+    DocumentsBucketName:
+      Value: !Ref DocumentsBucket
+    SummaryQueueUrl:
+      Value: !Ref SummaryQueue
+    SummaryQueueArn:
+      Value: !GetAtt SummaryQueue.Arn
+    SummaryDeadLetterQueueArn:
+      Value: !GetAtt SummaryDeadLetterQueue.Arn
