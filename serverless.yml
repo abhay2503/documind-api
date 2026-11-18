@@ -103,6 +103,10 @@ build:
     minify: false
     sourcemap: true
     target: node22
+    # The bundle is an ES module, but CommonJS dependencies (pg) call require('events') etc.
+    # This gives them a working require; without it every Lambda crashes on startup.
+    banner:
+      js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);"
 
 plugins:
   - serverless-offline
