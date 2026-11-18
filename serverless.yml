@@ -5,6 +5,7 @@
 #   --stage prod            -> .env.prod  (NOTE: v4 also loads .env for any variable missing
 #                                          from .env.prod, so .env.prod must define every key)
 # Code reads values via process.env (src/config). AWS access uses the Lambda IAM role.
+# Deploy credentials: locally the npm scripts set AWS_PROFILE=document-ai; GitHub Actions uses its OIDC role.
 
 service: documind-api
 
@@ -14,7 +15,6 @@ provider:
   architecture: arm64
   region: ap-south-1
   stage: ${opt:stage, 'local'}
-  profile: ${param:awsProfile}
   memorySize: 512
   timeout: 15
   logRetentionInDays: 14
@@ -62,12 +62,10 @@ provider:
 
 params:
   default:
-    awsProfile: ''
     queueUrl: ${env:SQS_QUEUE_URL}
     queueArn: arn:aws:sqs:${aws:region}:000000000000:documind-summary-queue-${sls:stage}
     localAwsEndpoint: ${env:LOCAL_AWS_ENDPOINT, ''}
   prod:
-    awsProfile: document-ai
     queueUrl: !Ref SummaryQueue
     queueArn: !GetAtt SummaryQueue.Arn
     # Never point production at LocalStack, even if .env defines it.
