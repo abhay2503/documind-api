@@ -1,5 +1,5 @@
 /**
- * Opt-in test of the S3/SQS integrations against LocalStack only (no MySQL needed).
+ * Opt-in test of the S3/SQS integrations against LocalStack only (no database needed).
  * Prerequisites: docker compose up -d, a filled-in .env. Run with: npm run test:localstack
  */
 import { DeleteMessageCommand, PurgeQueueCommand, ReceiveMessageCommand, SQSClient } from '@aws-sdk/client-sqs';

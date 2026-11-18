@@ -4,10 +4,10 @@ This is the frontend-facing API for DocuMind AI, written in Node.js and TypeScri
 
 - issuing presigned S3 uploads
 - verifying finished uploads
-- creating summary jobs in MySQL and publishing them to SQS
+- creating summary jobs in PostgreSQL and publishing them to SQS
 - returning job status and results
 
-**AI processing is not done here.** A separate Python worker consumes the SQS queue and writes progress and results back to MySQL. The two projects agree on a shared contract, described in [`worker-contract.md`](agent-os/specs/2026-11-16-1358-documind-node-api/worker-contract.md). The design notes are in [`agent-os/specs/2026-11-16-1358-documind-node-api/`](agent-os/specs/2026-11-16-1358-documind-node-api/).
+**AI processing is not done here.** A separate Python worker consumes the SQS queue and writes progress and results back to PostgreSQL. The two projects agree on a shared contract, described in [`worker-contract.md`](agent-os/specs/2026-11-16-1358-documind-node-api/worker-contract.md). The design notes are in [`agent-os/specs/2026-11-16-1358-documind-node-api/`](agent-os/specs/2026-11-16-1358-documind-node-api/).
 
 ## Routes
 
@@ -63,7 +63,7 @@ src/
   handlers/       thin Lambda handlers (validate → service → response)
   services/       business logic and AWS integrations (S3, SQS)
   repositories/   all SQL (parameterized)
-  database/       mysql2 pool, query helpers, transactions
+  database/       node-postgres (pg) pool, query helpers, transactions
   middleware/     withHttp: JSON parsing, logging, centralized errors
   utils/          errors, logger, ids, file types, API↔DB contract mapping
   types/          API (frontend) and DB (worker) shapes
@@ -82,7 +82,7 @@ tests/unit, tests/integration
 **Prerequisites:**
 - Node 22
 - Docker
-- The MySQL 8 server already running on the host (port 3306)
+- A PostgreSQL server running on the host (127.0.0.1:5432)
 - A Serverless Framework account. v4 needs a one-time `npx serverless login`.
 - No LocalStack account or token is needed. Compose uses **LocalStack Community 4.14.0**, the last release that runs without an auth token (newer 2026.x images refuse to start without a license).
 
@@ -93,10 +93,10 @@ cp .env.example .env            # then fill in DB_PASSWORD etc.
 # 1. Local AWS: S3 bucket (+ CORS) and SQS queue/DLQ are created by docker/localstack/init-aws.sh.
 #    --wait returns once the container is healthy, i.e. after the init script has finished.
 npm run localstack:up          # docker compose up -d --wait
-npm run test:localstack        # optional: checks S3 presign/PUT/HEAD/DELETE, CORS and SQS (no MySQL needed)
+npm run test:localstack        # optional: checks S3 presign/PUT/HEAD/DELETE, CORS and SQS (no database needed)
 
-# 2. MySQL (once): edit the password in database/setup-local.sql to match .env, then
-sudo mysql < database/setup-local.sql
+# 2. PostgreSQL (once): create the `documind` database if it is missing, then apply the schema
+PGPASSWORD=<your postgres password> psql -h 127.0.0.1 -U postgres -d postgres -f database/setup-local.sql
 npm run migrate
 
 # 3. API on http://localhost:4000
@@ -142,8 +142,8 @@ curl -s $API/summaries/$JOB          # → queued (until the Python worker proce
 ```bash
 npm run typecheck
 npm test                    # unit tests (S3/SQS mocked with aws-sdk-client-mock, repositories mocked)
-npm run test:localstack     # S3 + SQS integration against LocalStack only (no MySQL)
-npm run test:integration    # everything above + full upload → summary flow against LocalStack and local MySQL
+npm run test:localstack     # S3 + SQS integration against LocalStack only (no database)
+npm run test:integration    # everything above + full upload → summary flow against LocalStack and local PostgreSQL
 ```
 
 ## Configuration
@@ -164,7 +164,7 @@ Both are gitignored. `.env.example` lists every key.
 |---|---|
 | `NODE_ENV` | `development` / `production` |
 | `AWS_REGION` | `ap-south-1` locally. Lambda sets it automatically, so it is not injected. |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | MySQL |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | PostgreSQL (`DB_SSLMODE`: `disable` locally, `require` on Aiven) |
 | `DB_CONNECTION_LIMIT` | Pool size per Lambda container (default 2) |
 | `S3_BUCKET_NAME` | Documents bucket. In prod the stack creates this bucket under this name. |
 | `SQS_QUEUE_URL` | Local queue URL. In prod it is taken from the stack's own queue. |
@@ -182,7 +182,7 @@ Both are gitignored. `.env.example` lists every key.
 aws sso login --profile document-ai
 cp .env.example .env.prod        # fill in every key; leave LOCAL_AWS_ENDPOINT empty
 npm run package:prod             # dry run: builds and synthesizes CloudFormation without deploying
-npm run migrate:prod             # apply the schema to the production MySQL
+npm run migrate:prod             # apply the schema to the production PostgreSQL (Aiven)
 npm run deploy:prod              # serverless deploy --stage prod (uses profile document-ai)
 ```
 
@@ -203,7 +203,7 @@ npm run deploy:prod              # serverless deploy --stage prod (uses profile 
 
 The presigned upload URLs are signed with this same role.
 
-**The API does not provision MySQL.** If production MySQL is a private RDS instance, the functions need a `vpc` config, and S3 and SQS then need VPC endpoints or a NAT gateway. Decide this before the first deploy.
+**The API does not provision the database.** Production uses Aiven PostgreSQL over the public internet with `DB_SSLMODE=require`, so the Lambdas need no `vpc` config. If you move to a private network later, the functions need a `vpc` config, and S3 and SQS then need VPC endpoints or a NAT gateway.
 
 ## Known limitations / next steps
 

@@ -15,10 +15,13 @@ const configSchema = z
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     AWS_REGION: z.string().min(1).default('ap-south-1'),
     DB_HOST: z.string().min(1),
-    DB_PORT: z.coerce.number().int().positive().default(3306),
+    DB_PORT: z.coerce.number().int().positive().default(5432),
     DB_USER: z.string().min(1),
     DB_PASSWORD: z.string().default(''),
     DB_NAME: z.string().min(1),
+    /** disable = local Postgres; require = Aiven (encrypted); verify-full = encrypted + certificate check (needs DB_SSL_CA). */
+    DB_SSLMODE: z.enum(['disable', 'require', 'verify-full']).default('disable'),
+    DB_SSL_CA: z.string().optional(),
     DB_CONNECTION_LIMIT: z.coerce.number().int().min(1).max(10).default(2),
     S3_BUCKET_NAME: z.string().min(3),
     SQS_QUEUE_URL: z.url(),
@@ -47,6 +50,8 @@ export interface AppConfig {
     user: string;
     password: string;
     database: string;
+    sslMode: 'disable' | 'require' | 'verify-full';
+    sslCa?: string;
     connectionLimit: number;
   };
   s3BucketName: string;
@@ -76,6 +81,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       user: e.DB_USER,
       password: e.DB_PASSWORD,
       database: e.DB_NAME,
+      sslMode: e.DB_SSLMODE,
+      sslCa: e.DB_SSL_CA || undefined,
       connectionLimit: e.DB_CONNECTION_LIMIT,
     },
     s3BucketName: e.S3_BUCKET_NAME,

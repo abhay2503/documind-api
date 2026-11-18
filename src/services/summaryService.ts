@@ -126,7 +126,7 @@ export async function getSummaryJob(jobId: string, log: Logger): Promise<Summary
 }
 
 /**
- * Lazy recovery for a job committed to MySQL whose SQS publish was never confirmed
+ * Lazy recovery for a job committed to the database whose SQS publish was never confirmed
  * (e.g. the Lambda crashed between commit and publish). Driven by the frontend's polling,
  * so no scheduler or extra infrastructure is needed. Best-effort: errors are logged, not thrown.
  */

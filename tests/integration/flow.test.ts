@@ -1,5 +1,5 @@
 /**
- * Opt-in end-to-end test against LocalStack (S3/SQS) and the local MySQL database.
+ * Opt-in end-to-end test against LocalStack (S3/SQS) and the local PostgreSQL database.
  * Prerequisites: docker compose up -d, database/setup-local.sql, npm run migrate, a filled-in .env.
  * Run with: npm run test:integration
  */
@@ -14,7 +14,7 @@ import { silentLog } from '../helpers';
 
 const enabled = process.env.RUN_INTEGRATION === '1';
 
-describe.skipIf(!enabled)('upload → complete → summary job (LocalStack + MySQL)', () => {
+describe.skipIf(!enabled)('upload → complete → summary job (LocalStack + PostgreSQL)', () => {
   if (enabled) {
     process.loadEnvFile('.env');
     setConfigForTests(loadConfig({ ...process.env, NODE_ENV: 'development' }));
@@ -67,9 +67,9 @@ describe.skipIf(!enabled)('upload → complete → summary job (LocalStack + MyS
     await execute(
       getPool(),
       `UPDATE summary_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP(3),
-         result = JSON_OBJECT('overview', 'Test overview', 'keyPoints', JSON_ARRAY('a'),
-                              'findings', JSON_ARRAY(), 'actionItems', JSON_ARRAY())
-       WHERE job_id = ?`,
+         result = jsonb_build_object('overview', 'Test overview', 'keyPoints', jsonb_build_array('a'),
+                                    'findings', jsonb_build_array(), 'actionItems', jsonb_build_array())
+       WHERE job_id = $1`,
       [job.jobId],
     );
     const done = await getSummaryJob(job.jobId, silentLog);

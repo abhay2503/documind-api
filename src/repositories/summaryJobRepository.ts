@@ -19,7 +19,7 @@ export async function insertQueuedJob(db: Queryable, job: NewSummaryJob): Promis
     db,
     `INSERT INTO summary_jobs
        (job_id, document_id, status, summary_style, instructions, instructions_hash, idempotency_key, publish_attempts)
-     VALUES (?, ?, 'queued', ?, ?, ?, ?, 1)`,
+     VALUES ($1, $2, 'queued', $3, $4, $5, $6, 1)`,
     [job.jobId, job.documentId, job.style, job.instructions, job.instructionsHash, job.idempotencyKey],
   );
 }
@@ -31,7 +31,7 @@ export async function findJobByIdempotencyKey(
 ): Promise<SummaryJobRow | undefined> {
   return queryOne<SummaryJobRow>(
     db,
-    `SELECT ${JOB_COLUMNS} FROM summary_jobs j WHERE j.document_id = ? AND j.idempotency_key = ?`,
+    `SELECT ${JOB_COLUMNS} FROM summary_jobs j WHERE j.document_id = $1 AND j.idempotency_key = $2`,
     [documentId, idempotencyKey],
   );
 }
@@ -46,7 +46,7 @@ export async function findActiveDuplicateJob(
   return queryOne<SummaryJobRow>(
     db,
     `SELECT ${JOB_COLUMNS} FROM summary_jobs j
-     WHERE j.document_id = ? AND j.summary_style = ? AND j.instructions_hash <=> ?
+     WHERE j.document_id = $1 AND j.summary_style = $2 AND j.instructions_hash IS NOT DISTINCT FROM $3
        AND j.status IN ('queued', 'processing')
      ORDER BY j.created_at DESC LIMIT 1`,
     [documentId, style, instructionsHash],
@@ -61,9 +61,9 @@ export async function findJobWithDocument(
   const params: (string | null)[] = [jobId];
   let sql = `SELECT ${JOB_COLUMNS}, d.file_name, d.user_id
      FROM summary_jobs j JOIN documents d ON d.document_id = j.document_id
-     WHERE j.job_id = ?`;
+     WHERE j.job_id = $1`;
   if (opts.userId !== undefined) {
-    sql += ' AND d.user_id <=> ?';
+    sql += ' AND d.user_id IS NOT DISTINCT FROM $2';
     params.push(opts.userId);
   }
   return queryOne<SummaryJobWithDocumentRow>(db, sql, params);
@@ -72,7 +72,7 @@ export async function findJobWithDocument(
 export async function markJobPublished(db: Queryable, jobId: string): Promise<void> {
   await execute(
     db,
-    'UPDATE summary_jobs SET published_at = CURRENT_TIMESTAMP(3) WHERE job_id = ? AND published_at IS NULL',
+    'UPDATE summary_jobs SET published_at = CURRENT_TIMESTAMP(3) WHERE job_id = $1 AND published_at IS NULL',
     [jobId],
   );
 }
@@ -84,10 +84,10 @@ export async function markJobPublishFailed(db: Queryable, jobId: string): Promis
     `UPDATE summary_jobs
      SET status = 'failed', error_code = 'QUEUE_PUBLISH_FAILED',
          error_message = 'Could not queue the job for processing.', completed_at = CURRENT_TIMESTAMP(3)
-     WHERE job_id = ? AND status = 'queued' AND published_at IS NULL`,
+     WHERE job_id = $1 AND status = 'queued' AND published_at IS NULL`,
     [jobId],
   );
-  return result.affectedRows === 1;
+  return result.rowCount === 1;
 }
 
 /**
@@ -103,9 +103,9 @@ export async function claimRepublish(
   const result = await execute(
     db,
     `UPDATE summary_jobs SET publish_attempts = publish_attempts + 1
-     WHERE job_id = ? AND status = 'queued' AND published_at IS NULL AND publish_attempts = ?
-       AND updated_at < CURRENT_TIMESTAMP(3) - INTERVAL ? SECOND`,
+     WHERE job_id = $1 AND status = 'queued' AND published_at IS NULL AND publish_attempts = $2
+       AND updated_at < CURRENT_TIMESTAMP(3) - make_interval(secs => $3)`,
     [jobId, expectedAttempts, staleAfterSeconds],
   );
-  return result.affectedRows === 1;
+  return result.rowCount === 1;
 }

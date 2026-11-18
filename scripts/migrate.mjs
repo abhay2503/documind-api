@@ -1,10 +1,11 @@
 // Applies database/migrations/*.sql in filename order and records each in schema_migrations.
 // Usage: npm run migrate (reads .env) | npm run migrate:prod (reads .env.prod)
+// Each migration runs in its own transaction (PostgreSQL DDL is transactional), so a failure applies nothing.
 import { readdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import mysql from 'mysql2/promise';
+import pg from 'pg';
 
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'database', 'migrations');
 
@@ -15,23 +16,30 @@ for (const key of ['DB_HOST', 'DB_USER', 'DB_NAME']) {
   }
 }
 
-const conn = await mysql.createConnection({
+const sslMode = process.env.DB_SSLMODE ?? 'disable';
+const ssl =
+  sslMode === 'disable'
+    ? false
+    : { rejectUnauthorized: sslMode === 'verify-full', ca: process.env.DB_SSL_CA || undefined };
+
+const client = new pg.Client({
   host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT ?? 3306),
+  port: Number(process.env.DB_PORT ?? 5432),
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  multipleStatements: true,
+  ssl,
 });
+await client.connect();
 
 try {
-  await conn.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
+  await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     name VARCHAR(255) NOT NULL PRIMARY KEY,
     checksum CHAR(64) NOT NULL,
-    applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-  ) ENGINE=InnoDB`);
+    applied_at TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+  )`);
 
-  const [rows] = await conn.query('SELECT name, checksum FROM schema_migrations');
+  const { rows } = await client.query('SELECT name, checksum FROM schema_migrations');
   const applied = new Map(rows.map((r) => [r.name, r.checksum]));
   const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
 
@@ -44,12 +52,18 @@ try {
       }
       continue;
     }
-    // MySQL DDL auto-commits, so a failed migration may be partially applied; keep migrations small.
     console.log(`Applying ${file}...`);
-    await conn.query(sql);
-    await conn.execute('INSERT INTO schema_migrations (name, checksum) VALUES (?, ?)', [file, checksum]);
+    await client.query('BEGIN');
+    try {
+      await client.query(sql);
+      await client.query('INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)', [file, checksum]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    }
   }
   console.log('Migrations up to date.');
 } finally {
-  await conn.end();
+  await client.end();
 }

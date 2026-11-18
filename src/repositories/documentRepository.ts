@@ -17,7 +17,7 @@ export async function insertPendingDocument(db: Queryable, doc: NewDocument): Pr
   await execute(
     db,
     `INSERT INTO documents (document_id, user_id, file_name, content_type, file_size, s3_key, status)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending_upload')`,
+     VALUES ($1, $2, $3, $4, $5, $6, 'pending_upload')`,
     [doc.documentId, doc.userId, doc.fileName, doc.contentType, doc.fileSize, doc.s3Key],
   );
 }
@@ -32,9 +32,9 @@ export async function findDocument(
   opts: { userId?: string | null; forUpdate?: boolean } = {},
 ): Promise<DocumentRow | undefined> {
   const params: (string | null)[] = [documentId];
-  let sql = `SELECT ${COLUMNS} FROM documents WHERE document_id = ?`;
+  let sql = `SELECT ${COLUMNS} FROM documents WHERE document_id = $1`;
   if (opts.userId !== undefined) {
-    sql += ' AND user_id <=> ?';
+    sql += ' AND user_id IS NOT DISTINCT FROM $2';
     params.push(opts.userId);
   }
   if (opts.forUpdate) sql += ' FOR UPDATE';
@@ -46,8 +46,8 @@ export async function markDocumentUploaded(db: Queryable, documentId: string): P
   const result = await execute(
     db,
     `UPDATE documents SET status = 'uploaded', uploaded_at = CURRENT_TIMESTAMP(3)
-     WHERE document_id = ? AND status = 'pending_upload'`,
+     WHERE document_id = $1 AND status = 'pending_upload'`,
     [documentId],
   );
-  return result.affectedRows === 1;
+  return result.rowCount === 1;
 }
