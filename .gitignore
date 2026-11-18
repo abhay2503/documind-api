@@ -12,3 +12,7 @@ coverage/
 
 *.log
 .DS_Store
+
+# This project uses npm (package-lock.json); stray pnpm files make Serverless try to run pnpm
+pnpm-lock.yaml
+pnpm-workspace.yaml
