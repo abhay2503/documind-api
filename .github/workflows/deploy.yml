@@ -28,6 +28,17 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+      # Empty IDs would deploy a JWT authorizer with a broken issuer/audience (every request 401). Fail first.
+      - name: Check Cognito variables
+        env:
+          COGNITO_USER_POOL_ID: ${{ vars.COGNITO_USER_POOL_ID }}
+          COGNITO_APP_CLIENT_ID: ${{ vars.COGNITO_APP_CLIENT_ID }}
+        run: |
+          if [ -z "$COGNITO_USER_POOL_ID" ] || [ -z "$COGNITO_APP_CLIENT_ID" ]; then
+            echo "::error::Set the repository variables COGNITO_USER_POOL_ID and COGNITO_APP_CLIENT_ID (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
