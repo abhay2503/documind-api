@@ -17,9 +17,10 @@ describe.skipIf(!enabled)('PostgreSQL connection and repositories', () => {
   }
   const tag = Math.random().toString(16).slice(2, 10);
   const documentId = `doc_pgtest_${tag}`;
+  const ownedDocumentId = `doc_pgtest_owned_${tag}`;
 
   afterAll(async () => {
-    await execute(getPool(), 'DELETE FROM documents WHERE document_id = $1', [documentId]); // cascades to jobs
+    await execute(getPool(), 'DELETE FROM documents WHERE document_id IN ($1, $2)', [documentId, ownedDocumentId]); // cascades to jobs
     await closePool();
   });
 
@@ -49,6 +50,24 @@ describe.skipIf(!enabled)('PostgreSQL connection and repositories', () => {
       insertQueuedJob(getPool(), { jobId: `job_pgtest_${tag}2`, documentId, style: 'concise', instructions: null, instructionsHash: null, idempotencyKey: 'k1' }),
     ).rejects.toSatisfy(isDuplicateKeyError);
     expect(await findJobWithDocument(getPool(), `job_pgtest_${tag}`)).toMatchObject({ status: 'queued', file_name: 'a.pdf' });
+  });
+
+  it('enforces ownership in SQL (documents and jobs), and legacy NULL-owner rows match no user', async () => {
+    await insertPendingDocument(getPool(), {
+      documentId: ownedDocumentId, userId: 'user-a', fileName: 'o.pdf', contentType: 'application/pdf', fileSize: 1, s3Key: `documents/${ownedDocumentId}/o.pdf`,
+    });
+    expect(await findDocument(getPool(), ownedDocumentId, { userId: 'user-a' })).toMatchObject({ user_id: 'user-a' });
+    expect(await findDocument(getPool(), ownedDocumentId, { userId: 'user-b' })).toBeUndefined();
+    // documentId was inserted with user_id NULL (pre-authentication row): no authenticated user can see it.
+    expect(await findDocument(getPool(), documentId, { userId: 'user-a' })).toBeUndefined();
+
+    const ownedJobId = `job_pgtest_owned_${tag}`;
+    await insertQueuedJob(getPool(), {
+      jobId: ownedJobId, documentId: ownedDocumentId, style: 'concise', instructions: null, instructionsHash: null, idempotencyKey: null,
+    });
+    expect(await findJobWithDocument(getPool(), ownedJobId, { userId: 'user-a' })).toMatchObject({ job_id: ownedJobId, user_id: 'user-a' });
+    expect(await findJobWithDocument(getPool(), ownedJobId, { userId: 'user-b' })).toBeUndefined();
+    expect(await findJobWithDocument(getPool(), `job_pgtest_${tag}`, { userId: 'user-a' })).toBeUndefined();
   });
 
   it('updated_at trigger advances on update', async () => {

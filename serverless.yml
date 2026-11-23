@@ -25,11 +25,22 @@ provider:
       allowedHeaders:
         - Content-Type
         - Idempotency-Key
+        - Authorization
       allowedMethods:
         - GET
         - POST
         - OPTIONS
       maxAge: 600
+    # Native HTTP API JWT authorizer for the existing (manually created) Cognito User Pool.
+    # API Gateway validates signature, issuer, expiry and the access token's client_id against
+    # `audience` and returns 401 before Lambda runs. Lambda only reads the verified `sub` claim.
+    authorizers:
+      cognitoJwt:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl: https://cognito-idp.ap-south-1.amazonaws.com/${env:COGNITO_USER_POOL_ID}
+        audience:
+          - ${env:COGNITO_APP_CLIENT_ID}
   environment:
     NODE_ENV: ${env:NODE_ENV}
     DB_HOST: ${env:DB_HOST}
@@ -78,24 +89,32 @@ functions:
       - httpApi:
           method: POST
           path: /uploads
+          authorizer:
+            name: cognitoJwt
   completeUpload:
     handler: src/handlers/completeUpload.handler
     events:
       - httpApi:
           method: POST
           path: /documents/{documentId}/complete
+          authorizer:
+            name: cognitoJwt
   createSummary:
     handler: src/handlers/createSummary.handler
     events:
       - httpApi:
           method: POST
           path: /summaries
+          authorizer:
+            name: cognitoJwt
   getSummary:
     handler: src/handlers/getSummary.handler
     events:
       - httpApi:
           method: GET
           path: /summaries/{jobId}
+          authorizer:
+            name: cognitoJwt
 
 build:
   esbuild:

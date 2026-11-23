@@ -20,6 +20,7 @@ The request and response shapes match the frontend (`../ui/src/lib/api`) exactly
 | POST | `/summaries` | `{ documentId, style, instructions? }` plus an optional `Idempotency-Key` header | **202** `{ jobId, documentId, status }` |
 | GET | `/summaries/{jobId}` | none | **200** `{ jobId, documentId, status, stage?, result?, error? }` |
 
+- **Authentication:** every route requires `Authorization: Bearer <Cognito access token>`. See [Authentication and ownership](#authentication-and-ownership).
 - **`style`:** `concise`, `detailed`, `bullets` or `insights`. These are stored in the database as `bullet_points` and `key_insights`.
 - **`status`:** `queued`, `processing`, `done` or `failed`. `done` is stored in the database as `completed`.
 - **Accepted files:** `.pdf`, `.docx` and `.txt`, up to 10 MB. The `Content-Type` is included in the upload URL's signature, so the browser must send the same `Content-Type` when it uploads.
@@ -28,6 +29,7 @@ The request and response shapes match the frontend (`../ui/src/lib/api`) exactly
   | Status | Codes |
   |---|---|
   | 400 | `VALIDATION_ERROR` |
+  | 401 | Returned by API Gateway for a missing, invalid or expired token (body `{"message":"Unauthorized"}`; Lambda is not invoked). `UNAUTHORIZED` from Lambda only if a route ever bypasses the authorizer. |
   | 404 | `DOCUMENT_NOT_FOUND`, `JOB_NOT_FOUND` |
   | 409 | `UPLOAD_NOT_FOUND`, `UPLOAD_SIZE_MISMATCH`, `UPLOAD_TYPE_MISMATCH`, `DOCUMENT_NOT_UPLOADED` |
   | 413 | `FILE_TOO_LARGE` |
@@ -35,6 +37,13 @@ The request and response shapes match the frontend (`../ui/src/lib/api`) exactly
   | 503 | `QUEUE_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, `STORAGE_UNAVAILABLE` |
 
 - **Not built yet:** `POST /summaries/{jobId}/questions` (follow-up questions) is deferred and is not part of this API yet.
+
+## Authentication and ownership
+
+- **Who validates the token:** API Gateway's native HTTP API **JWT authorizer** (`cognitoJwt` in `serverless.yml`) validates the Cognito **access token**: signature, issuer `https://cognito-idp.ap-south-1.amazonaws.com/<COGNITO_USER_POOL_ID>`, expiry, and `client_id` against the audience `<COGNITO_APP_CLIENT_ID>`. A request with a missing or invalid token gets a 401 from API Gateway and never reaches Lambda. The User Pool and the public App Client (no secret) were created manually and are not managed by this stack.
+- **Identity:** Lambda reads only the verified `sub` claim (`event.requestContext.authorizer.jwt.claims.sub`) through `getAuthenticatedUserId` (`src/utils/auth.ts`). A `userId` sent in the body, query string or headers is ignored. Email is not used as an identifier.
+- **Ownership:** `POST /uploads` stores the `sub` in `documents.user_id`. Summary jobs belong to a user through `summary_jobs.document_id → documents.user_id`. The other three routes filter by owner in SQL. A document or job that belongs to another user returns the **same 404** as one that doesn't exist (`DOCUMENT_NOT_FOUND` / `JOB_NOT_FOUND`). This happens before any S3 call, job insert or SQS publish.
+- **Documents created before authentication** (`user_id IS NULL`) are kept as they are: there is no backfill and nothing is deleted. Since no authenticated `sub` matches NULL, these documents and their jobs return 404 to every user. If any of them ever needs to be reassigned, that has to be a deliberate manual `UPDATE documents SET user_id = '<sub>'`, done only with real evidence of who owns them.
 
 ## How it works
 
@@ -126,15 +135,19 @@ aws --endpoint-url http://localhost:4566 --region ap-south-1 sqs receive-message
 ```bash
 API=http://localhost:4000
 printf 'hello documind\n' > /tmp/sample.txt
-R=$(curl -s -X POST $API/uploads -H 'Content-Type: application/json' \
+# Every route needs a Cognito access token (serverless-offline checks iss/aud/exp but not the signature).
+# Copy one from the signed-in UI, e.g. (await fetchAuthSession()).tokens.accessToken.toString()
+TOKEN=<access-token>
+AUTH="Authorization: Bearer $TOKEN"
+R=$(curl -s -X POST $API/uploads -H "$AUTH" -H 'Content-Type: application/json' \
      -d "{\"fileName\":\"sample.txt\",\"contentType\":\"text/plain\",\"size\":$(stat -c%s /tmp/sample.txt)}")
 DOC=$(echo "$R" | node -pe 'JSON.parse(require("fs").readFileSync(0)).documentId')
 URL=$(echo "$R" | node -pe 'JSON.parse(require("fs").readFileSync(0)).uploadUrl')
 curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @/tmp/sample.txt "$URL"
-curl -s -X POST $API/documents/$DOC/complete
-J=$(curl -s -X POST $API/summaries -H 'Content-Type: application/json' -d "{\"documentId\":\"$DOC\",\"style\":\"bullets\"}")
+curl -s -X POST $API/documents/$DOC/complete -H "$AUTH"
+J=$(curl -s -X POST $API/summaries -H "$AUTH" -H 'Content-Type: application/json' -d "{\"documentId\":\"$DOC\",\"style\":\"bullets\"}")
 JOB=$(echo "$J" | node -pe 'JSON.parse(require("fs").readFileSync(0)).jobId')
-curl -s $API/summaries/$JOB          # → queued (until the Python worker processes it)
+curl -s $API/summaries/$JOB -H "$AUTH"   # → queued (until the Python worker processes it)
 ```
 
 ## Tests
@@ -170,6 +183,7 @@ Both are gitignored. `.env.example` lists every key.
 | `SQS_QUEUE_URL` | Local queue URL. In prod it is taken from the stack's own queue. |
 | `LOCAL_AWS_ENDPOINT` | LocalStack endpoint (local only) |
 | `CORS_ALLOWED_ORIGIN` | Frontend origin, used for both API Gateway CORS and S3 bucket CORS |
+| `COGNITO_USER_POOL_ID`, `COGNITO_APP_CLIENT_ID` | The existing Cognito User Pool and public App Client. Used only by `serverless.yml` to configure the API Gateway JWT authorizer; they are not passed to Lambda. CI reads them from the GitHub repository **variables** of the same names. |
 | `UPLOAD_URL_EXPIRES_SECONDS`, `MAX_UPLOAD_BYTES` | 900 and 10 MB by default |
 | `SQS_VISIBILITY_TIMEOUT_SECONDS` | Prod queue visibility timeout. Must be at least 6× the Python worker's Lambda timeout. |
 | `LOG_LEVEL` | `debug` / `info` / `warn` / `error` (optional) |
@@ -187,7 +201,7 @@ npm run deploy:prod              # serverless deploy --stage prod (uses profile 
 ```
 
 **What the stack creates:**
-- 4 Lambda functions (`nodejs22.x`, arm64) and an HTTP API with CORS for `CORS_ALLOWED_ORIGIN`.
+- 4 Lambda functions (`nodejs22.x`, arm64) and an HTTP API with CORS for `CORS_ALLOWED_ORIGIN`, plus a Cognito JWT authorizer on every route. No Cognito resources are created.
 - An S3 bucket (`S3_BUCKET_NAME`) with these settings:
   - private, with all public access blocked
   - SSE-S3 encryption
@@ -207,7 +221,7 @@ The presigned upload URLs are signed with this same role.
 
 ## Known limitations / next steps
 
-- There is no authentication yet. `documents.user_id` is nullable, and the repositories already accept an optional `userId` for ownership checks.
+- There are no per-user usage limits yet.
 - Follow-up Q&A (`POST /summaries/{jobId}/questions`) is deferred, and its owner is not yet decided.
 - Upload objects whose `/complete` call never happens are not cleaned up. Consider an S3 lifecycle rule or a cleanup job later.
 - Rate limiting and API Gateway throttling are left at their defaults.

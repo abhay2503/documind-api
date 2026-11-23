@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { validate, withHttp } from '../middleware/httpHandler';
 import { createSummaryJob } from '../services/summaryService';
+import { getAuthenticatedUserId } from '../utils/auth';
 import { API_SUMMARY_STYLES } from '../utils/contract';
 import { isDocumentId } from '../utils/ids';
 
@@ -20,10 +21,11 @@ const idempotencyKeySchema = z
 
 /** POST /summaries — creates a queued job and publishes {jobId, documentId} to SQS. Returns immediately. */
 export const handler = withHttp(async ({ event, body, log }) => {
+  const userId = getAuthenticatedUserId(event);
   const input = validate(bodySchema, body);
   const idempotencyKey = validate(
     z.object({ key: idempotencyKeySchema }),
     { key: event.headers?.['idempotency-key'] },
   ).key;
-  return { statusCode: 202, body: await createSummaryJob({ ...input, idempotencyKey }, log) };
+  return { statusCode: 202, body: await createSummaryJob({ ...input, idempotencyKey, userId }, log) };
 });

@@ -16,8 +16,11 @@ export interface CreateUploadInput {
 
 const mb = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
 
-/** Validates the requested upload, records it as pending, and returns a presigned PUT URL. No AI processing. */
-export async function createUpload(input: CreateUploadInput, log: Logger): Promise<CreateUploadResponse> {
+/**
+ * Validates the requested upload, records it as pending (owned by `userId`, the authenticated Cognito `sub`),
+ * and returns a presigned PUT URL. No AI processing.
+ */
+export async function createUpload(input: CreateUploadInput, userId: string, log: Logger): Promise<CreateUploadResponse> {
   const config = getConfig();
 
   const fileType = fileTypeForName(input.fileName);
@@ -36,7 +39,7 @@ export async function createUpload(input: CreateUploadInput, log: Logger): Promi
 
   await insertPendingDocument(getPool(), {
     documentId,
-    userId: null,
+    userId,
     fileName: input.fileName,
     contentType: fileType.mimeType,
     fileSize: input.size,
@@ -52,10 +55,11 @@ export async function createUpload(input: CreateUploadInput, log: Logger): Promi
 /**
  * Verifies the uploaded object against the server-side record (never a client-supplied key)
  * and marks the document uploaded. Idempotent. Does NOT start processing.
+ * Another user's document is reported exactly like a missing one (404), before any S3 call.
  */
-export async function completeUpload(documentId: string, log: Logger): Promise<CompleteUploadResponse> {
+export async function completeUpload(documentId: string, userId: string, log: Logger): Promise<CompleteUploadResponse> {
   const config = getConfig();
-  const doc = await findDocument(getPool(), documentId);
+  const doc = await findDocument(getPool(), documentId, { userId });
   if (!doc) {
     throw new NotFoundError('DOCUMENT_NOT_FOUND', 'The requested document was not found.');
   }

@@ -37,6 +37,7 @@
     "serverless": "4.46.0",
     "serverless-offline": "14.8.4",
     "typescript": "7.0.2",
-    "vitest": "5.1.0"
+    "vitest": "5.1.0",
+    "yaml": "2.8.1"
   }
 }

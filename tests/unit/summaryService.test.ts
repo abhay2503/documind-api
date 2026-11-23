@@ -2,7 +2,7 @@ import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { mockClient } from 'aws-sdk-client-mock';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentRow } from '../../src/types/db';
-import { DOC_ID, JOB_ID, jobRow, silentLog } from '../helpers';
+import { DOC_ID, JOB_ID, jobRow, OTHER_USER_ID, silentLog, USER_ID } from '../helpers';
 
 vi.mock('../../src/database/pool', () => ({
   getPool: () => ({}),
@@ -26,7 +26,7 @@ const { createSummaryJob, getSummaryJob } = await import('../../src/services/sum
 
 const sqsMock = mockClient(SQSClient);
 
-const uploadedDoc = { document_id: DOC_ID, status: 'uploaded' } as DocumentRow;
+const uploadedDoc = { document_id: DOC_ID, user_id: USER_ID, status: 'uploaded' } as DocumentRow;
 
 beforeEach(() => {
   sqsMock.reset();
@@ -38,10 +38,10 @@ beforeEach(() => {
 
 describe('createSummaryJob', () => {
   it('commits a queued job, then publishes identifiers only', async () => {
-    const res = await createSummaryJob({ documentId: DOC_ID, style: 'bullets' }, silentLog);
+    const res = await createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'bullets' }, silentLog);
 
     expect(res).toEqual({ jobId: expect.stringMatching(/^job_[0-9a-f]{32}$/), documentId: DOC_ID, status: 'queued' });
-    expect(docRepo.findDocument).toHaveBeenCalledWith(expect.anything(), DOC_ID, { forUpdate: true });
+    expect(docRepo.findDocument).toHaveBeenCalledWith(expect.anything(), DOC_ID, { userId: USER_ID, forUpdate: true });
     expect(jobRepo.insertQueuedJob).toHaveBeenCalledWith(expect.anything(), {
       jobId: res.jobId,
       documentId: DOC_ID,
@@ -58,7 +58,7 @@ describe('createSummaryJob', () => {
 
   it('returns 404 for an unknown document', async () => {
     vi.mocked(docRepo.findDocument).mockResolvedValue(undefined);
-    await expect(createSummaryJob({ documentId: DOC_ID, style: 'concise' }, silentLog)).rejects.toMatchObject({
+    await expect(createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'concise' }, silentLog)).rejects.toMatchObject({
       statusCode: 404,
     });
     expect(sqsMock.calls()).toHaveLength(0);
@@ -66,7 +66,7 @@ describe('createSummaryJob', () => {
 
   it('returns 409 when the upload was not completed', async () => {
     vi.mocked(docRepo.findDocument).mockResolvedValue({ ...uploadedDoc, status: 'pending_upload' });
-    await expect(createSummaryJob({ documentId: DOC_ID, style: 'concise' }, silentLog)).rejects.toMatchObject({
+    await expect(createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'concise' }, silentLog)).rejects.toMatchObject({
       statusCode: 409,
       code: 'DOCUMENT_NOT_UPLOADED',
     });
@@ -74,7 +74,7 @@ describe('createSummaryJob', () => {
 
   it('returns the existing job for a repeated Idempotency-Key without publishing', async () => {
     vi.mocked(jobRepo.findJobByIdempotencyKey).mockResolvedValue(jobRow({ status: 'processing' }));
-    const res = await createSummaryJob({ documentId: DOC_ID, style: 'concise', idempotencyKey: 'k1' }, silentLog);
+    const res = await createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'concise', idempotencyKey: 'k1' }, silentLog);
     expect(res).toEqual({ jobId: JOB_ID, documentId: DOC_ID, status: 'processing' });
     expect(jobRepo.insertQueuedJob).not.toHaveBeenCalled();
     expect(sqsMock.calls()).toHaveLength(0);
@@ -82,7 +82,7 @@ describe('createSummaryJob', () => {
 
   it('reuses an active duplicate job (double-click protection)', async () => {
     vi.mocked(jobRepo.findActiveDuplicateJob).mockResolvedValue(jobRow());
-    const res = await createSummaryJob({ documentId: DOC_ID, style: 'bullets', instructions: '  focus  ' }, silentLog);
+    const res = await createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'bullets', instructions: '  focus  ' }, silentLog);
     expect(res.jobId).toBe(JOB_ID);
     expect(jobRepo.findActiveDuplicateJob).toHaveBeenCalledWith(
       expect.anything(),
@@ -95,7 +95,7 @@ describe('createSummaryJob', () => {
 
   it('marks the job failed and returns 503 when SQS publishing fails', async () => {
     sqsMock.on(SendMessageCommand).rejects(new Error('sqs down'));
-    await expect(createSummaryJob({ documentId: DOC_ID, style: 'detailed' }, silentLog)).rejects.toMatchObject({
+    await expect(createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'detailed' }, silentLog)).rejects.toMatchObject({
       statusCode: 503,
       code: 'QUEUE_UNAVAILABLE',
     });
@@ -106,7 +106,7 @@ describe('createSummaryJob', () => {
 
   it('still succeeds if recording published_at fails after a successful publish', async () => {
     vi.mocked(jobRepo.markJobPublished).mockRejectedValue(new Error('db blip'));
-    await expect(createSummaryJob({ documentId: DOC_ID, style: 'concise' }, silentLog)).resolves.toMatchObject({
+    await expect(createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'concise' }, silentLog)).resolves.toMatchObject({
       status: 'queued',
     });
   });
@@ -114,8 +114,43 @@ describe('createSummaryJob', () => {
   it('returns the winning job when an idempotency-key insert races', async () => {
     vi.mocked(jobRepo.findJobByIdempotencyKey).mockResolvedValueOnce(undefined).mockResolvedValueOnce(jobRow());
     vi.mocked(jobRepo.insertQueuedJob).mockRejectedValue(Object.assign(new Error('dup'), { code: 'ER_DUP_ENTRY' }));
-    const res = await createSummaryJob({ documentId: DOC_ID, style: 'concise', idempotencyKey: 'k1' }, silentLog);
+    const res = await createSummaryJob({ userId: USER_ID, documentId: DOC_ID, style: 'concise', idempotencyKey: 'k1' }, silentLog);
     expect(res.jobId).toBe(JOB_ID);
+    expect(sqsMock.calls()).toHaveLength(0);
+  });
+});
+
+describe('createSummaryJob ownership', () => {
+  it("rejects another user's document with 404 before creating a job or touching SQS", async () => {
+    // findDocument filters by owner in SQL, so another user's document is returned as missing.
+    vi.mocked(docRepo.findDocument).mockResolvedValue(undefined);
+    await expect(
+      createSummaryJob({ userId: OTHER_USER_ID, documentId: DOC_ID, style: 'concise', idempotencyKey: 'k1' }, silentLog),
+    ).rejects.toMatchObject({ statusCode: 404, code: 'DOCUMENT_NOT_FOUND' });
+    expect(docRepo.findDocument).toHaveBeenCalledWith(expect.anything(), DOC_ID, { userId: OTHER_USER_ID, forUpdate: true });
+    expect(jobRepo.findJobByIdempotencyKey).not.toHaveBeenCalled();
+    expect(jobRepo.findActiveDuplicateJob).not.toHaveBeenCalled();
+    expect(jobRepo.insertQueuedJob).not.toHaveBeenCalled();
+    expect(sqsMock.calls()).toHaveLength(0);
+  });
+});
+
+describe('getSummaryJob ownership', () => {
+  it('returns the authenticated user\'s own job, looked up scoped to that user', async () => {
+    vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(jobRow({ status: 'processing' }));
+    await expect(getSummaryJob(JOB_ID, USER_ID, silentLog)).resolves.toMatchObject({ jobId: JOB_ID, status: 'processing' });
+    expect(jobRepo.findJobWithDocument).toHaveBeenCalledWith(expect.anything(), JOB_ID, { userId: USER_ID });
+  });
+
+  it("returns 404 for another user's job and never triggers recovery for it", async () => {
+    vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(undefined);
+    await expect(getSummaryJob(JOB_ID, OTHER_USER_ID, silentLog)).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'JOB_NOT_FOUND',
+      message: 'The requested summary job was not found.',
+    });
+    expect(jobRepo.findJobWithDocument).toHaveBeenCalledWith(expect.anything(), JOB_ID, { userId: OTHER_USER_ID });
+    expect(jobRepo.claimRepublish).not.toHaveBeenCalled();
     expect(sqsMock.calls()).toHaveLength(0);
   });
 });
@@ -123,19 +158,19 @@ describe('createSummaryJob', () => {
 describe('getSummaryJob', () => {
   it('returns 404 for unknown jobs', async () => {
     vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(undefined);
-    await expect(getSummaryJob(JOB_ID, silentLog)).rejects.toMatchObject({ statusCode: 404, code: 'JOB_NOT_FOUND' });
+    await expect(getSummaryJob(JOB_ID, USER_ID, silentLog)).rejects.toMatchObject({ statusCode: 404, code: 'JOB_NOT_FOUND' });
   });
 
   it('does not attempt recovery for published jobs', async () => {
     vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(jobRow());
-    await expect(getSummaryJob(JOB_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
+    await expect(getSummaryJob(JOB_ID, USER_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
     expect(jobRepo.claimRepublish).not.toHaveBeenCalled();
   });
 
   it('republishes a stuck unpublished job when the claim succeeds', async () => {
     vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(jobRow({ published_at: null, publish_attempts: 1 }));
     vi.mocked(jobRepo.claimRepublish).mockResolvedValue(true);
-    await expect(getSummaryJob(JOB_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
+    await expect(getSummaryJob(JOB_ID, USER_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
     expect(jobRepo.claimRepublish).toHaveBeenCalledWith(expect.anything(), JOB_ID, 1, 60);
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     expect(jobRepo.markJobPublished).toHaveBeenCalled();
@@ -144,7 +179,7 @@ describe('getSummaryJob', () => {
   it('does not republish when another poller holds the claim', async () => {
     vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(jobRow({ published_at: null }));
     vi.mocked(jobRepo.claimRepublish).mockResolvedValue(false);
-    await getSummaryJob(JOB_ID, silentLog);
+    await getSummaryJob(JOB_ID, USER_ID, silentLog);
     expect(sqsMock.calls()).toHaveLength(0);
   });
 
@@ -152,7 +187,7 @@ describe('getSummaryJob', () => {
     vi.mocked(jobRepo.findJobWithDocument)
       .mockResolvedValueOnce(jobRow({ published_at: null, publish_attempts: 3 }))
       .mockResolvedValueOnce(jobRow({ published_at: null, publish_attempts: 3, status: 'failed', error_code: 'QUEUE_PUBLISH_FAILED' }));
-    const res = await getSummaryJob(JOB_ID, silentLog);
+    const res = await getSummaryJob(JOB_ID, USER_ID, silentLog);
     expect(jobRepo.markJobPublishFailed).toHaveBeenCalledWith(expect.anything(), JOB_ID);
     expect(res.status).toBe('failed');
     expect(sqsMock.calls()).toHaveLength(0);
@@ -162,6 +197,6 @@ describe('getSummaryJob', () => {
     vi.mocked(jobRepo.findJobWithDocument).mockResolvedValue(jobRow({ published_at: null }));
     vi.mocked(jobRepo.claimRepublish).mockResolvedValue(true);
     sqsMock.on(SendMessageCommand).rejects(new Error('still down'));
-    await expect(getSummaryJob(JOB_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
+    await expect(getSummaryJob(JOB_ID, USER_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
   });
 });

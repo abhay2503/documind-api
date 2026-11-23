@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { validate, withHttp } from '../middleware/httpHandler';
 import { getSummaryJob } from '../services/summaryService';
+import { getAuthenticatedUserId } from '../utils/auth';
 import { isJobId } from '../utils/ids';
 
 const paramsSchema = z.object({
@@ -9,6 +10,7 @@ const paramsSchema = z.object({
 
 /** GET /summaries/{jobId} — latest status (and result when done) as written by the Python worker. */
 export const handler = withHttp(async ({ event, log }) => {
+  const userId = getAuthenticatedUserId(event);
   const { jobId } = validate(paramsSchema, event.pathParameters);
-  return { statusCode: 200, body: await getSummaryJob(jobId, log) };
+  return { statusCode: 200, body: await getSummaryJob(jobId, userId, log) };
 });

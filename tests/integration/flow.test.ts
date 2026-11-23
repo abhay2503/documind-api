@@ -10,7 +10,7 @@ import { closePool, execute, getPool } from '../../src/database/pool';
 import { awsClientOptions } from '../../src/services/awsClientOptions';
 import { getSummaryJob, createSummaryJob } from '../../src/services/summaryService';
 import { completeUpload, createUpload } from '../../src/services/uploadService';
-import { silentLog } from '../helpers';
+import { OTHER_USER_ID, silentLog, USER_ID } from '../helpers';
 
 const enabled = process.env.RUN_INTEGRATION === '1';
 
@@ -27,23 +27,23 @@ describe.skipIf(!enabled)('upload → complete → summary job (LocalStack + Pos
   it('runs the full API flow and publishes identifiers to SQS', async () => {
     const content = Buffer.from('DocuMind integration test document.\n');
 
-    const upload = await createUpload({ fileName: 'integration.txt', contentType: 'text/plain', size: content.length }, silentLog);
+    const upload = await createUpload({ fileName: 'integration.txt', contentType: 'text/plain', size: content.length }, USER_ID, silentLog);
 
     // Before the PUT, completion must fail.
-    await expect(completeUpload(upload.documentId, silentLog)).rejects.toMatchObject({ code: 'UPLOAD_NOT_FOUND' });
+    await expect(completeUpload(upload.documentId, USER_ID, silentLog)).rejects.toMatchObject({ code: 'UPLOAD_NOT_FOUND' });
 
     const put = await fetch(upload.uploadUrl, { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: content });
     expect(put.status).toBe(200);
 
-    await expect(completeUpload(upload.documentId, silentLog)).resolves.toMatchObject({ status: 'uploaded' });
+    await expect(completeUpload(upload.documentId, USER_ID, silentLog)).resolves.toMatchObject({ status: 'uploaded' });
     // Idempotent.
-    await expect(completeUpload(upload.documentId, silentLog)).resolves.toMatchObject({ status: 'uploaded' });
+    await expect(completeUpload(upload.documentId, USER_ID, silentLog)).resolves.toMatchObject({ status: 'uploaded' });
 
-    const job = await createSummaryJob({ documentId: upload.documentId, style: 'bullets' }, silentLog);
+    const job = await createSummaryJob({ userId: USER_ID, documentId: upload.documentId, style: 'bullets' }, silentLog);
     expect(job.status).toBe('queued');
 
     // Double click returns the same active job.
-    const again = await createSummaryJob({ documentId: upload.documentId, style: 'bullets' }, silentLog);
+    const again = await createSummaryJob({ userId: USER_ID, documentId: upload.documentId, style: 'bullets' }, silentLog);
     expect(again.jobId).toBe(job.jobId);
 
     const sqs = new SQSClient(awsClientOptions());
@@ -61,7 +61,14 @@ describe.skipIf(!enabled)('upload → complete → summary job (LocalStack + Pos
     }
     expect(body).toEqual({ jobId: job.jobId, documentId: upload.documentId });
 
-    await expect(getSummaryJob(job.jobId, silentLog)).resolves.toMatchObject({ status: 'queued' });
+    // Another authenticated user cannot see or act on this user's document or job.
+    await expect(completeUpload(upload.documentId, OTHER_USER_ID, silentLog)).rejects.toMatchObject({ statusCode: 404 });
+    await expect(
+      createSummaryJob({ userId: OTHER_USER_ID, documentId: upload.documentId, style: 'concise' }, silentLog),
+    ).rejects.toMatchObject({ statusCode: 404, code: 'DOCUMENT_NOT_FOUND' });
+    await expect(getSummaryJob(job.jobId, OTHER_USER_ID, silentLog)).rejects.toMatchObject({ statusCode: 404, code: 'JOB_NOT_FOUND' });
+
+    await expect(getSummaryJob(job.jobId, USER_ID, silentLog)).resolves.toMatchObject({ status: 'queued' });
 
     // Simulate the Python worker completing the job.
     await execute(
@@ -72,7 +79,7 @@ describe.skipIf(!enabled)('upload → complete → summary job (LocalStack + Pos
        WHERE job_id = $1`,
       [job.jobId],
     );
-    const done = await getSummaryJob(job.jobId, silentLog);
+    const done = await getSummaryJob(job.jobId, USER_ID, silentLog);
     expect(done.status).toBe('done');
     expect(done.result).toMatchObject({ documentName: 'integration.txt', style: 'bullets', overview: 'Test overview' });
   });

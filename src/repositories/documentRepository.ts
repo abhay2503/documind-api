@@ -23,7 +23,7 @@ export async function insertPendingDocument(db: Queryable, doc: NewDocument): Pr
 }
 
 /**
- * userId is reserved for future ownership checks: when provided, only that user's document matches.
+ * Ownership check: when userId is provided, only that user's document matches (legacy NULL-owner rows never match a real user).
  * `forUpdate` locks the row (only meaningful inside a transaction).
  */
 export async function findDocument(

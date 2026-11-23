@@ -6,6 +6,9 @@ export const silentLog = createLogger({}, 'error');
 
 export const DOC_ID = 'doc_0123456789abcdef0123456789abcdef';
 export const JOB_ID = 'job_0123456789abcdef0123456789abcdef';
+/** Cognito `sub` values (UUIDs) for the authenticated user and some other user. */
+export const USER_ID = '11111111-2222-4333-8444-555555555555';
+export const OTHER_USER_ID = '99999999-8888-4777-8666-555555555555';
 
 export function jobRow(overrides: Partial<SummaryJobWithDocumentRow> = {}): SummaryJobWithDocumentRow {
   return {
@@ -23,11 +26,19 @@ export function jobRow(overrides: Partial<SummaryJobWithDocumentRow> = {}): Summ
     created_at: new Date('2026-01-01T10:00:00Z'),
     completed_at: null,
     file_name: 'invoice.pdf',
-    user_id: null,
+    user_id: USER_ID,
     ...overrides,
   };
 }
 
+/** The requestContext API Gateway's JWT authorizer produces for a validated Cognito access token. */
+export function jwtRequestContext(sub: unknown = USER_ID): APIGatewayProxyEventV2['requestContext'] {
+  return {
+    authorizer: { jwt: { claims: { sub, client_id: 'test-client', token_use: 'access' }, scopes: null } },
+  } as unknown as APIGatewayProxyEventV2['requestContext'];
+}
+
+/** An HTTP API event, authenticated as USER_ID by default (override requestContext to change that). */
 export function httpEvent(overrides: Partial<APIGatewayProxyEventV2> = {}): APIGatewayProxyEventV2 {
   return {
     version: '2.0',
@@ -36,9 +47,14 @@ export function httpEvent(overrides: Partial<APIGatewayProxyEventV2> = {}): APIG
     rawQueryString: '',
     headers: {},
     isBase64Encoded: false,
-    requestContext: {} as APIGatewayProxyEventV2['requestContext'],
+    requestContext: jwtRequestContext(),
     ...overrides,
   };
+}
+
+/** An event with no authorizer claims (only possible if a route skipped the API Gateway authorizer). */
+export function unauthenticatedEvent(overrides: Partial<APIGatewayProxyEventV2> = {}): APIGatewayProxyEventV2 {
+  return httpEvent({ requestContext: {} as APIGatewayProxyEventV2['requestContext'], ...overrides });
 }
 
 export const lambdaContext = { awsRequestId: 'req-test' } as Context;

@@ -20,6 +20,12 @@ export class ValidationError extends AppError {
   }
 }
 
+export class UnauthorizedError extends AppError {
+  constructor(message = 'Authentication is required.') {
+    super(401, 'UNAUTHORIZED', message);
+  }
+}
+
 export class NotFoundError extends AppError {
   constructor(code: 'DOCUMENT_NOT_FOUND' | 'JOB_NOT_FOUND' | 'ROUTE_NOT_FOUND', message: string) {
     super(404, code, message);
