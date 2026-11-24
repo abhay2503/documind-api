@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { validate, withHttp } from '../middleware/httpHandler';
 import { createSummaryJob } from '../services/summaryService';
-import { getAuthenticatedUserId } from '../utils/auth';
+import { getAuthenticatedUser } from '../utils/auth';
 import { API_SUMMARY_STYLES } from '../utils/contract';
 import { isDocumentId } from '../utils/ids';
 
@@ -19,13 +19,17 @@ const idempotencyKeySchema = z
   .regex(/^[A-Za-z0-9._:-]+$/, 'invalid characters')
   .optional();
 
-/** POST /summaries — creates a queued job and publishes {jobId, documentId} to SQS. Returns immediately. */
+/**
+ * POST /summaries — enforces the daily summary quota, creates a queued job and publishes {jobId, documentId}
+ * to SQS. Returns immediately; 429 DAILY_SUMMARY_LIMIT_REACHED when the quota is used up (nothing is queued).
+ */
 export const handler = withHttp(async ({ event, body, log }) => {
-  const userId = getAuthenticatedUserId(event);
+  // Identity and admin role come only from the verified JWT; body fields like userId/isAdmin are stripped by zod.
+  const { userId, isAdmin } = getAuthenticatedUser(event);
   const input = validate(bodySchema, body);
   const idempotencyKey = validate(
     z.object({ key: idempotencyKeySchema }),
     { key: event.headers?.['idempotency-key'] },
   ).key;
-  return { statusCode: 202, body: await createSummaryJob({ ...input, idempotencyKey, userId }, log) };
+  return { statusCode: 202, body: await createSummaryJob({ ...input, idempotencyKey, userId, isAdmin }, log) };
 });

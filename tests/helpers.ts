@@ -38,6 +38,13 @@ export function jwtRequestContext(sub: unknown = USER_ID): APIGatewayProxyEventV
   } as unknown as APIGatewayProxyEventV2['requestContext'];
 }
 
+/** Like jwtRequestContext, with a `cognito:groups` claim (HTTP API delivers it as a string like "[admin]"). */
+export function jwtRequestContextWithGroups(groups: unknown, sub: unknown = USER_ID): APIGatewayProxyEventV2['requestContext'] {
+  const ctx = jwtRequestContext(sub) as unknown as { authorizer: { jwt: { claims: Record<string, unknown> } } };
+  ctx.authorizer.jwt.claims['cognito:groups'] = groups;
+  return ctx as unknown as APIGatewayProxyEventV2['requestContext'];
+}
+
 /** An HTTP API event, authenticated as USER_ID by default (override requestContext to change that). */
 export function httpEvent(overrides: Partial<APIGatewayProxyEventV2> = {}): APIGatewayProxyEventV2 {
   return {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DOC_ID, httpEvent, JOB_ID, jwtRequestContext, lambdaContext, OTHER_USER_ID, unauthenticatedEvent, USER_ID } from '../helpers';
+import { TooManyRequestsError } from '../../src/utils/errors';
+import { DOC_ID, httpEvent, JOB_ID, jwtRequestContext, jwtRequestContextWithGroups, lambdaContext, OTHER_USER_ID, unauthenticatedEvent, USER_ID } from '../helpers';
 
 vi.mock('../../src/services/uploadService', () => ({ createUpload: vi.fn(), completeUpload: vi.fn() }));
 vi.mock('../../src/services/summaryService', () => ({ createSummaryJob: vi.fn(), getSummaryJob: vi.fn() }));
@@ -59,15 +60,15 @@ describe('POST /documents/{documentId}/complete', () => {
 
 describe('POST /summaries', () => {
   it('accepts frontend style names, passes the Idempotency-Key, returns 202', async () => {
-    vi.mocked(summaryService.createSummaryJob).mockResolvedValue({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued' });
+    vi.mocked(summaryService.createSummaryJob).mockResolvedValue({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued', dailyLimit: 5, dailyUsed: 1, dailyRemaining: 4 });
     const res = await call(
       createSummary,
       httpEvent({ headers: { 'idempotency-key': 'abc-123' }, body: JSON.stringify({ documentId: DOC_ID, style: 'insights' }) }),
     );
     expect(res.statusCode).toBe(202);
-    expect(json(res)).toEqual({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued' });
+    expect(json(res)).toEqual({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued', dailyLimit: 5, dailyUsed: 1, dailyRemaining: 4 });
     expect(summaryService.createSummaryJob).toHaveBeenCalledWith(
-      { documentId: DOC_ID, style: 'insights', idempotencyKey: 'abc-123', userId: USER_ID },
+      { documentId: DOC_ID, style: 'insights', idempotencyKey: 'abc-123', userId: USER_ID, isAdmin: false },
       expect.anything(),
     );
   });
@@ -111,10 +112,10 @@ describe('authenticated identity', () => {
   });
 
   it('passes the JWT sub (not a body userId) to createSummaryJob', async () => {
-    vi.mocked(summaryService.createSummaryJob).mockResolvedValue({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued' });
+    vi.mocked(summaryService.createSummaryJob).mockResolvedValue({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued', dailyLimit: 5, dailyUsed: 1, dailyRemaining: 4 });
     await call(createSummary, httpEvent({ body: JSON.stringify({ documentId: DOC_ID, style: 'concise', userId: OTHER_USER_ID }) }));
     expect(summaryService.createSummaryJob).toHaveBeenCalledWith(
-      { documentId: DOC_ID, style: 'concise', idempotencyKey: undefined, userId: USER_ID },
+      { documentId: DOC_ID, style: 'concise', idempotencyKey: undefined, userId: USER_ID, isAdmin: false },
       expect.anything(),
     );
   });
@@ -144,5 +145,41 @@ describe('authenticated identity', () => {
     for (const fn of [...Object.values(uploadService), ...Object.values(summaryService)]) {
       expect(fn).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('POST /summaries daily quota', () => {
+  const body = JSON.stringify({ documentId: DOC_ID, style: 'concise' });
+
+  it('treats a member of the Cognito admin group as admin (HTTP API flattens the groups claim)', async () => {
+    vi.mocked(summaryService.createSummaryJob).mockResolvedValue({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued', dailyLimit: 50, dailyUsed: 1, dailyRemaining: 49 });
+    const res = await call(createSummary, httpEvent({ body, requestContext: jwtRequestContextWithGroups('[users admin]') }));
+    expect(res.statusCode).toBe(202);
+    expect(json(res)).toMatchObject({ dailyLimit: 50, dailyUsed: 1, dailyRemaining: 49 });
+    expect(summaryService.createSummaryJob).toHaveBeenCalledWith(expect.objectContaining({ userId: USER_ID, isAdmin: true }), expect.anything());
+  });
+
+  it('ignores userId / isAdmin / dailyLimit sent by the frontend', async () => {
+    vi.mocked(summaryService.createSummaryJob).mockResolvedValue({ jobId: JOB_ID, documentId: DOC_ID, status: 'queued', dailyLimit: 5, dailyUsed: 1, dailyRemaining: 4 });
+    await call(
+      createSummary,
+      httpEvent({
+        headers: { 'x-is-admin': 'true' },
+        body: JSON.stringify({ documentId: DOC_ID, style: 'concise', userId: OTHER_USER_ID, isAdmin: true, dailyLimit: 1000 }),
+      }),
+    );
+    expect(summaryService.createSummaryJob).toHaveBeenCalledWith(
+      { documentId: DOC_ID, style: 'concise', idempotencyKey: undefined, userId: USER_ID, isAdmin: false },
+      expect.anything(),
+    );
+  });
+
+  it('returns 429 { message, code } when the daily limit is reached', async () => {
+    vi.mocked(summaryService.createSummaryJob).mockRejectedValue(
+      new TooManyRequestsError('DAILY_SUMMARY_LIMIT_REACHED', 'Daily summary limit reached.'),
+    );
+    const res = await call(createSummary, httpEvent({ body }));
+    expect(res.statusCode).toBe(429);
+    expect(json(res)).toEqual({ message: 'Daily summary limit reached.', code: 'DAILY_SUMMARY_LIMIT_REACHED' });
   });
 });

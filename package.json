@@ -16,7 +16,7 @@
     "migrate:prod": "node --env-file=.env.prod scripts/migrate.mjs",
     "package:prod": "AWS_PROFILE=document-ai serverless package --stage prod",
     "deploy:prod": "AWS_PROFILE=document-ai serverless deploy --stage prod",
-    "test:postgres": "RUN_INTEGRATION=1 vitest run tests/integration/postgres.test.ts",
+    "test:postgres": "RUN_INTEGRATION=1 vitest run tests/integration/postgres.test.ts tests/integration/summaryUsage.test.ts",
     "test:localstack": "RUN_INTEGRATION=1 vitest run tests/integration/localstack.test.ts",
     "localstack:up": "docker compose up -d --wait",
     "localstack:down": "docker compose down"

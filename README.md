@@ -17,7 +17,7 @@ The request and response shapes match the frontend (`../ui/src/lib/api`) exactly
 |---|---|---|---|
 | POST | `/uploads` | `{ fileName, contentType, size }` | **201** `{ documentId, key, uploadUrl, expiresIn }` |
 | POST | `/documents/{documentId}/complete` | no body | **200** `{ documentId, status: "uploaded", fileName }` |
-| POST | `/summaries` | `{ documentId, style, instructions? }` plus an optional `Idempotency-Key` header | **202** `{ jobId, documentId, status }` |
+| POST | `/summaries` | `{ documentId, style, instructions? }` plus an optional `Idempotency-Key` header | **202** `{ jobId, documentId, status, dailyLimit, dailyUsed, dailyRemaining }` |
 | GET | `/summaries/{jobId}` | none | **200** `{ jobId, documentId, status, stage?, result?, error? }` |
 
 - **Authentication:** every route requires `Authorization: Bearer <Cognito access token>`. See [Authentication and ownership](#authentication-and-ownership).
@@ -33,6 +33,7 @@ The request and response shapes match the frontend (`../ui/src/lib/api`) exactly
   | 404 | `DOCUMENT_NOT_FOUND`, `JOB_NOT_FOUND` |
   | 409 | `UPLOAD_NOT_FOUND`, `UPLOAD_SIZE_MISMATCH`, `UPLOAD_TYPE_MISMATCH`, `DOCUMENT_NOT_UPLOADED` |
   | 413 | `FILE_TOO_LARGE` |
+  | 429 | `DAILY_SUMMARY_LIMIT_REACHED` |
   | 500 | `INTERNAL_ERROR` |
   | 503 | `QUEUE_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, `STORAGE_UNAVAILABLE` |
 
@@ -44,6 +45,13 @@ The request and response shapes match the frontend (`../ui/src/lib/api`) exactly
 - **Identity:** Lambda reads only the verified `sub` claim (`event.requestContext.authorizer.jwt.claims.sub`) through `getAuthenticatedUserId` (`src/utils/auth.ts`). A `userId` sent in the body, query string or headers is ignored. Email is not used as an identifier.
 - **Ownership:** `POST /uploads` stores the `sub` in `documents.user_id`. Summary jobs belong to a user through `summary_jobs.document_id → documents.user_id`. The other three routes filter by owner in SQL. A document or job that belongs to another user returns the **same 404** as one that doesn't exist (`DOCUMENT_NOT_FOUND` / `JOB_NOT_FOUND`). This happens before any S3 call, job insert or SQS publish.
 - **Documents created before authentication** (`user_id IS NULL`) are kept as they are: there is no backfill and nothing is deleted. Since no authenticated `sub` matches NULL, these documents and their jobs return 404 to every user. If any of them ever needs to be reassigned, that has to be a deliberate manual `UPDATE documents SET user_id = '<sub>'`, done only with real evidence of who owns them.
+
+## Daily summary quota
+
+- **Limits:** a user can create **5** new summary jobs per day, and a member of the Cognito **`admin`** group can create **50**. Admin status comes only from the verified token's `cognito:groups` claim. HTTP API passes that claim to Lambda as a string like `"[admin]"`. Any `userId`, `isAdmin` or limit value the client sends is ignored.
+- **Day:** the UTC calendar day on the server, so the quota resets at 00:00 UTC (05:30 IST). The browser's timezone has no effect.
+- **What counts:** a new job the API accepts and queues. Returning an existing job (an `Idempotency-Key` replay or a double click) costs nothing. A job that fails later in the AI worker is **not** refunded. The quota is only given back if the SQS publish fails and the API answers 503.
+- **Enforcement:** `POST /summaries` increments `user_summary_usage` atomically, in the same transaction as the job insert, after the ownership check and before SQS. The table has one row per `(user_id, usage_date)`. The increment is a single `INSERT … ON CONFLICT DO UPDATE … WHERE summary_count < limit` statement. Concurrent requests serialize on the row lock, so a user at 4/5 who sends two requests at once gets exactly one job. Over the limit, the response is **429** `{"message":"Daily summary limit reached.","code":"DAILY_SUMMARY_LIMIT_REACHED"}`, and no job row or SQS message is created.
 
 ## How it works
 
@@ -196,9 +204,21 @@ Both are gitignored. `.env.example` lists every key.
 aws sso login --profile document-ai
 cp .env.example .env.prod        # fill in every key; leave LOCAL_AWS_ENDPOINT empty
 npm run package:prod             # dry run: builds and synthesizes CloudFormation without deploying
-npm run migrate:prod             # apply the schema to the production PostgreSQL (Aiven)
+npm run migrate:prod             # apply the schema to the production PostgreSQL (Aiven) — must run BEFORE deploying code that uses a new table
 npm run deploy:prod              # serverless deploy --stage prod (uses profile document-ai)
 ```
+
+**Before deploying an authorizer/CORS change:** run `npm run package:prod`, then compare `.serverless/cloudformation-template-update-stack.json` against `aws cloudformation get-template --stack-name documind-api-prod --profile document-ai`. Expect only these changes: a new `AWS::ApiGatewayV2::Authorizer`, `AuthorizationType`/`AuthorizerId` on the routes, CORS `AllowHeaders`, and the Lambda code and versions. Nothing should be replaced.
+
+**After deploying, check auth against the live API** (`API=<HttpApiUrl>`):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $API/uploads                                   # 401, no header
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $API/uploads -H 'Authorization: Bearer garbage' # 401, invalid token
+curl -s -o /dev/null -w '%{http_code}\n' $API/summaries/job_0123456789abcdef0123456789abcdef -H "Authorization: Bearer $TOKEN"  # 404, valid token
+```
+
+The 401s should leave no new invocations in the Lambda's CloudWatch logs. Then check with two users: user B gets 404 for user A's `jobId` and `documentId`.
 
 **What the stack creates:**
 - 4 Lambda functions (`nodejs22.x`, arm64) and an HTTP API with CORS for `CORS_ALLOWED_ORIGIN`, plus a Cognito JWT authorizer on every route. No Cognito resources are created.
@@ -221,7 +241,7 @@ The presigned upload URLs are signed with this same role.
 
 ## Known limitations / next steps
 
-- There are no per-user usage limits yet.
+- The daily quota counts summary jobs only. There are no token-based quotas yet.
 - Follow-up Q&A (`POST /summaries/{jobId}/questions`) is deferred, and its owner is not yet decided.
 - Upload objects whose `/complete` call never happens are not cleaned up. Consider an S3 lifecycle rule or a cleanup job later.
 - Rate limiting and API Gateway throttling are left at their defaults.

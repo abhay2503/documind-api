@@ -38,6 +38,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class TooManyRequestsError extends AppError {
+  constructor(code: 'DAILY_SUMMARY_LIMIT_REACHED', message: string) {
+    super(429, code, message);
+  }
+}
+
 export class FileTooLargeError extends AppError {
   constructor(message: string) {
     super(413, 'FILE_TOO_LARGE', message);

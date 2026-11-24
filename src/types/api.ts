@@ -44,6 +44,10 @@ export interface CreateSummaryResponse {
   jobId: string;
   documentId: string;
   status: ApiJobStatus;
+  /** Daily summary quota (UTC day). Additive fields: older clients can ignore them. */
+  dailyLimit: number;
+  dailyUsed: number;
+  dailyRemaining: number;
 }
 
 export interface ErrorResponse {
